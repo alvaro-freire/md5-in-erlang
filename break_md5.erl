@@ -1,9 +1,13 @@
 -module(break_md5).
 -define(PASS_LEN, 6).
--define(UPDATE_BAR_GAP, 1000).
+-define(UPDATE_BAR_GAP, 1000000).
 -define(BAR_SIZE, 40).
+-define(THREADS, 5).
+-define(BATCH, 500).
 
 -export([break_md5/1,
+         break_md5s/1,
+         worker/2,
          pass_to_num/1,
          num_to_pass/1,
          num_to_hex_string/1,
@@ -52,6 +56,14 @@ int_to_hex_char(N) ->
 hex_string_to_num(Hex_Str) ->
     lists:foldl(fun(Hex, Num) -> Num*16 + hex_char_to_int(Hex) end, 0, Hex_Str).
 
+hex_strings_to_nums([], Sol) -> Sol;
+hex_strings_to_nums([H | T], Sol) ->
+    Sol2 = Sol ++ [hex_string_to_num(H)],
+    hex_strings_to_nums(T, Sol2).
+
+hex_strings_to_nums(Hashes) ->
+    hex_strings_to_nums(Hashes, []).
+
 num_to_hex_string_aux(0, Str) -> Str;
 num_to_hex_string_aux(N, Str) ->
     num_to_hex_string_aux(N div 16,
@@ -62,17 +74,23 @@ num_to_hex_string(N) -> num_to_hex_string_aux(N, []).
 
 %% Progress bar runs in its own process
 
-progress_loop(N, Bound) ->
+progress_loop(N, Bound, T1) ->
     receive
         stop -> ok;
         {progress_report, Checked} ->
             N2 = N + Checked,
             Full_N = N2 * ?BAR_SIZE div Bound,
             Full = lists:duplicate(Full_N, $=),
+            T2 = erlang:monotonic_time(microsecond),
+            Te = T2 - T1,
+            HpS = ?UPDATE_BAR_GAP / (Te + 1) * 1000,
             Empty = lists:duplicate(?BAR_SIZE - Full_N, $-),
-            io:format("\r[~s~s] ~.2f%", [Full, Empty, N2/Bound*100]),
-            progress_loop(N2, Bound)
+            io:format("\r[~s~s] ~.2f%   ~.2f kH/s   ", [Full, Empty, N2/Bound*100, HpS]),
+            progress_loop(N2, Bound, erlang:monotonic_time(microsecond))
     end.
+
+
+progress_loop(N, Bound) -> progress_loop(N, Bound, erlang:monotonic_time(microsecond)).
 
 %% break_md5/2 iterates checking the possible passwords
 
@@ -102,3 +120,77 @@ break_md5(Hash) ->
     Res = break_md5(Num_Hash, 0, Bound, Progress_Pid),
     Progress_Pid ! stop,
     Res.
+
+check_hashes([], _, _, Res) -> Res;
+check_hashes([H | T], Num_Hash, Pass, Res) ->
+    if
+        H == Num_Hash ->
+            Res1 = Res + 1,
+            io:format("\e[2K\r~.16B: ~s~n", [Num_Hash, Pass]),
+            check_hashes(T, Num_Hash, Pass, Res1);
+        true ->
+            check_hashes(T, Num_Hash, Pass, Res)
+    end.
+
+check_hashes(Target_Hashes, Num_Hash, Pass) -> 
+    check_hashes(Target_Hashes, Num_Hash, Pass, 0).
+
+worker(Target_Hashes, Master_Pid, _) ->
+    receive
+        stop ->
+            ok;
+        N ->
+            S = break_md5m(Target_Hashes, N, N + ?BATCH, 0),
+            Master_Pid ! {self(), S}
+    end,
+    worker(Target_Hashes, Master_Pid, next).
+
+worker(Target_Hashes, Master_Pid) -> 
+    Master_Pid ! {self(), 0},
+    worker(Target_Hashes, Master_Pid, next).
+
+start_workers(T, Args) ->
+    if 
+        T == 0 ->
+            ok;
+        true ->
+            spawn(?MODULE, worker, Args),
+            start_workers(T - 1, Args)
+    end.
+
+break_md5s(Hashes) -> 
+    Bound = pow(26, ?PASS_LEN),
+    Progress_Pid = spawn(?MODULE, progress_loop, [0, Bound]),
+    Num_Hashes = hex_strings_to_nums(Hashes),
+    start_workers(?THREADS, [Num_Hashes, self()]),
+    master(Progress_Pid, 0, Bound, 0, length(Hashes)).
+
+
+break_md5m(_, N, N, S) -> S;
+break_md5m(Target_Hashes, N, Bound, S) ->
+    Pass = num_to_pass(N),
+    Hash = crypto:hash(md5, Pass),
+    Num_Hash = binary:decode_unsigned(Hash),
+    Res = check_hashes(Target_Hashes, Num_Hash, Pass),
+    break_md5m(Target_Hashes, N + 1, Bound, S + Res).
+
+
+master(_, _, _, S, S) -> dame90pavos;
+master(_, N, N, _, _) -> not_found;
+master(Progress_Pid, N, Bound, S, Sg) ->
+    if N rem ?UPDATE_BAR_GAP == 0 ->
+            Progress_Pid ! {progress_report, ?UPDATE_BAR_GAP};
+        true ->
+            ok
+    end,
+    receive
+        {Worker_pid, Sw} -> 
+            St = S + Sw,
+            if 
+                St == Sg ->
+                    Worker_pid ! stop;
+                true ->
+                    Worker_pid ! N
+            end
+    end,
+    master(Progress_Pid, N + ?BATCH, Bound, St, Sg).
