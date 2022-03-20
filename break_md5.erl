@@ -1,6 +1,6 @@
 -module(break_md5).
 -define(PASS_LEN, 6).
--define(UPDATE_BAR_GAP, 1000).
+-define(UPDATE_BAR_GAP, 10000).
 -define(BAR_SIZE, 40).
 
 -export([break_md5/1,
@@ -71,17 +71,23 @@ num_to_hex_string(N) -> num_to_hex_string_aux(N, []).
 
 %% Progress bar runs in its own process
 
-progress_loop(N, Bound) ->
+progress_loop(N, Bound, T1) ->
     receive
         stop -> ok;
         {progress_report, Checked} ->
             N2 = N + Checked,
             Full_N = N2 * ?BAR_SIZE div Bound,
             Full = lists:duplicate(Full_N, $=),
+            T2 = erlang:monotonic_time(microsecond),
+            Te = T2 - T1,
+            HpS = ?UPDATE_BAR_GAP / (Te + 1) * 1000,
             Empty = lists:duplicate(?BAR_SIZE - Full_N, $-),
-            io:format("\r[~s~s] ~.2f%", [Full, Empty, N2/Bound*100]),
-            progress_loop(N2, Bound)
+            io:format("\r[~s~s] ~.2f%   ~.2f kH/s   ", [Full, Empty, N2/Bound*100, HpS]),
+            progress_loop(N2, Bound, erlang:monotonic_time(microsecond))
     end.
+ 
+progress_loop(N, Bound) -> progress_loop(N, Bound, erlang:monotonic_time(microsecond)).
+
 
 %% break_md5/2 iterates checking the possible passwords
 
