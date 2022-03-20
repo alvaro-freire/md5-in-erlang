@@ -4,6 +4,7 @@
 -define(BAR_SIZE, 40).
 
 -export([break_md5/1,
+         break_md5s/1,
          pass_to_num/1,
          num_to_pass/1,
          num_to_hex_string/1,
@@ -51,6 +52,14 @@ int_to_hex_char(N) ->
 
 hex_string_to_num(Hex_Str) ->
     lists:foldl(fun(Hex, Num) -> Num*16 + hex_char_to_int(Hex) end, 0, Hex_Str).
+
+hex_strings_to_nums([], Sol) -> Sol;
+hex_strings_to_nums([H | T], Sol) ->
+    Sol2 = Sol ++ [hex_string_to_num(H)],
+    hex_strings_to_nums(T, Sol2).
+
+hex_strings_to_nums(Hashes) ->
+    hex_strings_to_nums(Hashes, []).
 
 num_to_hex_string_aux(0, Str) -> Str;
 num_to_hex_string_aux(N, Str) ->
@@ -100,5 +109,43 @@ break_md5(Hash) ->
     Progress_Pid = spawn(?MODULE, progress_loop, [0, Bound]),
     Num_Hash = hex_string_to_num(Hash),
     Res = break_md5(Num_Hash, 0, Bound, Progress_Pid),
+    Progress_Pid ! stop,
+    Res.
+
+check_hashes([], _, _, Res) -> Res;
+check_hashes([H | T], Num_Hash, Pass, Res) ->
+    if
+        H == Num_Hash ->
+            Res1 = Res + 1,
+            io:format("\e[2K\r~.16B: ~s~n", [Num_Hash, Pass]),
+            check_hashes(T, Num_Hash, Pass, Res1);
+        true ->
+            check_hashes(T, Num_Hash, Pass, Res)
+    end.
+
+check_hashes(Target_Hashes, Num_Hash, Pass) -> 
+    check_hashes(Target_Hashes, Num_Hash, Pass, 0).
+
+
+break_md5s(_, S, S, _, _, _) -> ok;  % Checked every possible password
+break_md5s(_, _, _, N, N, _) -> not_found;  % Checked every possible password
+break_md5s(Target_Hashes, S, G, N, Bound, Progress_Pid) ->
+    if N rem ?UPDATE_BAR_GAP == 0 ->
+            Progress_Pid ! {progress_report, ?UPDATE_BAR_GAP};
+        true ->
+            ok
+    end,
+    Pass = num_to_pass(N),
+    Hash = crypto:hash(md5, Pass),
+    Num_Hash = binary:decode_unsigned(Hash),
+    Res = check_hashes(Target_Hashes, Num_Hash, Pass),
+    S1 = S + Res,
+    break_md5s(Target_Hashes, S1, G,N+1, Bound, Progress_Pid).
+
+break_md5s(Hashes) -> 
+    Bound = pow(26, ?PASS_LEN),
+    Progress_Pid = spawn(?MODULE, progress_loop, [0, Bound]),
+    Num_Hashes = hex_strings_to_nums(Hashes),
+    Res = break_md5s(Num_Hashes, 0, length(Num_Hashes), 0, Bound, Progress_Pid),
     Progress_Pid ! stop,
     Res.
