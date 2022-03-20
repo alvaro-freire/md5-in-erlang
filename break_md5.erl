@@ -1,10 +1,13 @@
 -module(break_md5).
 -define(PASS_LEN, 6).
--define(UPDATE_BAR_GAP, 10000).
+-define(UPDATE_BAR_GAP, 1000000).
 -define(BAR_SIZE, 40).
+-define(THREADS, 5).
+-define(BATCH, 500).
 
 -export([break_md5/1,
          break_md5s/1,
+         worker/2,
          pass_to_num/1,
          num_to_pass/1,
          num_to_hex_string/1,
@@ -85,9 +88,9 @@ progress_loop(N, Bound, T1) ->
             io:format("\r[~s~s] ~.2f%   ~.2f kH/s   ", [Full, Empty, N2/Bound*100, HpS]),
             progress_loop(N2, Bound, erlang:monotonic_time(microsecond))
     end.
- 
-progress_loop(N, Bound) -> progress_loop(N, Bound, erlang:monotonic_time(microsecond)).
 
+
+progress_loop(N, Bound) -> progress_loop(N, Bound, erlang:monotonic_time(microsecond)).
 
 %% break_md5/2 iterates checking the possible passwords
 
@@ -132,26 +135,62 @@ check_hashes([H | T], Num_Hash, Pass, Res) ->
 check_hashes(Target_Hashes, Num_Hash, Pass) -> 
     check_hashes(Target_Hashes, Num_Hash, Pass, 0).
 
-
-break_md5s(_, S, S, _, _, _) -> ok;  % Checked every possible password
-break_md5s(_, _, _, N, N, _) -> not_found;  % Checked every possible password
-break_md5s(Target_Hashes, S, G, N, Bound, Progress_Pid) ->
-    if N rem ?UPDATE_BAR_GAP == 0 ->
-            Progress_Pid ! {progress_report, ?UPDATE_BAR_GAP};
-        true ->
-            ok
+worker(Target_Hashes, Master_Pid, _) ->
+    receive
+        stop ->
+            ok;
+        N ->
+            S = break_md5m(Target_Hashes, N, N + ?BATCH, 0),
+            Master_Pid ! {self(), S}
     end,
-    Pass = num_to_pass(N),
-    Hash = crypto:hash(md5, Pass),
-    Num_Hash = binary:decode_unsigned(Hash),
-    Res = check_hashes(Target_Hashes, Num_Hash, Pass),
-    S1 = S + Res,
-    break_md5s(Target_Hashes, S1, G,N+1, Bound, Progress_Pid).
+    worker(Target_Hashes, Master_Pid, next).
+
+worker(Target_Hashes, Master_Pid) -> 
+    Master_Pid ! {self(), 0},
+    worker(Target_Hashes, Master_Pid, next).
+
+start_workers(T, Args) ->
+    if 
+        T == 0 ->
+            ok;
+        true ->
+            spawn(?MODULE, worker, Args),
+            start_workers(T - 1, Args)
+    end.
 
 break_md5s(Hashes) -> 
     Bound = pow(26, ?PASS_LEN),
     Progress_Pid = spawn(?MODULE, progress_loop, [0, Bound]),
     Num_Hashes = hex_strings_to_nums(Hashes),
-    Res = break_md5s(Num_Hashes, 0, length(Num_Hashes), 0, Bound, Progress_Pid),
-    Progress_Pid ! stop,
-    Res.
+    start_workers(?THREADS, [Num_Hashes, self()]),
+    master(Progress_Pid, 0, Bound, 0, length(Hashes)).
+
+
+break_md5m(_, N, N, S) -> S;
+break_md5m(Target_Hashes, N, Bound, S) ->
+    Pass = num_to_pass(N),
+    Hash = crypto:hash(md5, Pass),
+    Num_Hash = binary:decode_unsigned(Hash),
+    Res = check_hashes(Target_Hashes, Num_Hash, Pass),
+    break_md5m(Target_Hashes, N + 1, Bound, S + Res).
+
+
+master(_, _, _, S, S) -> dame90pavos;
+master(_, N, N, _, _) -> not_found;
+master(Progress_Pid, N, Bound, S, Sg) ->
+    if N rem ?UPDATE_BAR_GAP == 0 ->
+            Progress_Pid ! {progress_report, ?UPDATE_BAR_GAP};
+        true ->
+            ok
+    end,
+    receive
+        {Worker_pid, Sw} -> 
+            St = S + Sw,
+            if 
+                St == Sg ->
+                    Worker_pid ! stop;
+                true ->
+                    Worker_pid ! N
+            end
+    end,
+    master(Progress_Pid, N + ?BATCH, Bound, St, Sg).
